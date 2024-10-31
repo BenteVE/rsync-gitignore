@@ -1,0 +1,84 @@
+#!/bin/bash
+
+# created on 2024-10-12
+# by Van Eeckhoudt Bente
+
+# Documentation:
+# An rsync wrapper that respects .gitignore files
+
+show_usage() {
+    echo "Usage: rsync-gitignore [OPTIONS] <src_dir> <dst_dir>"
+    echo "An rsync wrapper that respects .gitignore files"
+    echo "Any git repositories inside the source folder will be checked for files and folders to exclude."
+    echo "As a result, the destination folder will contain the source folder, excluding all files and folders ignored by git."
+    echo "Note that the --delete-excluded option is active, so any items in the destination that are not found in the source will be deleted."
+    echo "This wrapper only works for local source folders where git and cd can be executed."
+    echo ""
+    echo "Options:"
+    echo "  -h | --help  Show this message and quit"
+}
+
+# recurse all folders to find any git repositories
+# when a git repository is found, we list the files that are excluded
+recurse_folder() {
+    cd "$1" || return
+    if res="$(git ls-files --ignored -com --exclude-standard --directory 2>/dev/null)"; then
+        # if the passed directory is a git repository, we don't need to prepend anything before the git output
+        # Note: adding ./ before the output will not work as a pattern for rsync --exclude-from
+        if [[ "$PWD" == "$SRC" ]]; then
+            echo "$res" >>"$LIST_PATH"
+        else
+            # for nested git repos:
+            # prepend the current relative path before each line in the result of git ls-files
+            RELATIVE_PATH="${PWD#"$SRC/"}"
+            for i in $res; do echo "$RELATIVE_PATH/$i"; done >>"$LIST_PATH"
+        fi
+    else
+        for entry in *; do
+            if [ -d "$entry" ]; then
+                recurse_folder "$entry"
+            fi
+        done
+    fi
+    cd ..
+}
+
+shopt -s dotglob  # wildcard expands to include hidden files
+shopt -s nullglob # empty wildcard expands to null instead of itself
+IFS=$'\n'         # used for splitting the git ls-files at each line, even if there are spaces in the path
+
+# Using a temp file so the command can be run multiple times in parallel without interference
+LIST_PATH=
+SRC=
+DST=
+
+if [[ $# -eq 2 ]]; then
+
+    # Note: the rsync command behaves very differently with a source folder ending with or without /
+    # When ending in a /      => the content of the folder will be placed in the destination
+    # When ending without a / => the folder itself will be placed in the destination
+    # This difference can cause dangerous behaviour when used with --delete (or --delete-excluded)
+    # For this reason, we change the behaviour here to always end the source path without a /
+    SRC=$(realpath -s "$1")
+    DST="$2"
+
+    # This wrapper only works for directories, for individual files it makes no sense to check .gitignore
+    if [ -d "$SRC" ]; then
+        cd "$SRC" || exit 1
+
+        LIST_PATH=$(mktemp --tmpdir "rsync-gitignore-XXXXX")
+        recurse_folder .
+
+        rsync --verbose --archive --exclude-from="$LIST_PATH" --delete-excluded "$SRC" "$DST"
+
+    else
+        echo "source is not a valid folder"
+        show_usage >&2
+        exit 1
+    fi
+elif [[ $# -eq 1 && ("$1" == "-h" || "$1" == "--help") ]]; then
+    show_usage
+else
+    show_usage >&2
+    exit 1
+fi
